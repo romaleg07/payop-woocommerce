@@ -19,6 +19,48 @@ add_action('plugins_loaded', 'woocommerce_payop', 0);
 
 ini_set( 'error_log', WP_CONTENT_DIR . '/debug-payop.log' );
 
+
+add_action('woocommerce_checkout_process', 'process_payop_payment');
+function process_payop_payment(){
+
+    if($_POST['payment_method'] != 'payop')
+        return;
+
+    if( !isset($_POST['payment-method_payop']) || empty($_POST['payment-method_payop']) )
+        wc_add_notice( 'Please choose payment method', 'error' );
+
+}
+
+
+/**
+ * Update the order meta with field value
+ */
+add_action( 'woocommerce_checkout_update_order_meta', 'payop_payment_update_order_meta' );
+function payop_payment_update_order_meta( $order_id ) {
+
+    if($_POST['payment_method'] != 'payop')
+        return;
+
+    $chosen_mothod_id = $_POST['payment-method_payop'];
+    $key_for_currency = 'available-currency_payop-' . $chosen_mothod_id;
+    $currency_for_method = $_POST[$key_for_currency];
+    update_post_meta( $order_id, '_payment_method_payop', $chosen_mothod_id );
+    update_post_meta( $order_id, '_currencies_for_payment_method_payop', $currency_for_method );
+    update_post_meta( $order_id, '_test_all', $_POST );
+}
+
+
+add_action( 'woocommerce_admin_order_data_after_billing_address', 'payop_checkout_field_display_admin_order_meta', 10, 1 );
+function payop_checkout_field_display_admin_order_meta($order){
+    $method = get_post_meta( $order->id, '_payment_method_payop', true );
+    if($method != 'payop')
+        return;
+
+    $payop = get_post_meta( $order->id, 'payop', true );
+
+    echo '<p><strong>'.__( 'payop' ).':</strong> ' . $payop . '</p>';
+}
+
 /** 
  *
  */
@@ -44,8 +86,10 @@ function woocommerce_payop()
 
             $this->apiUrl = 'https://payop.com/v1/invoices/create';
 
+            $this->chosen_method = "381";
+
             $this->id = 'payop';
-            $this->icon = apply_filters('woocommerce_payop_icon', '' . $plugin_dir . 'payop.png');
+            $this->icon = apply_filters('woocommerce_payop_icon', '' . $plugin_dir . 'all_methods.png');
             // Load the settings
             $this->init_form_fields();
             $this->init_settings();
@@ -56,13 +100,16 @@ function woocommerce_payop()
             $this->jwt_token = $this->get_option('jwt_token');
             $this->secret_key = $this->get_option('secret_key');
             $this->skip_confirm = $this->get_option('skip_confirm');
-            $this->lifetime = $this->get_option('lifetime');
+            $this->lifetime = $this->get_option('lifetime'); 
             $this->auto_complete = $this->get_option('auto_complete');
-            $this->payment_method = $this->get_option('payment_method');
+            $this->payment_method = "381";
             $this->language = $this->get_option('payment_form_language');
             $this->description = $this->get_option('description');
             $this->instructions = $this->get_option('instructions');
+            $this->accepted_methods = [381, 3822, 200001, 200003, 360, 200946, 200947, 200948, 200949, 203821, 210000];
 
+
+ 
             //Actions
             add_action('payop-ipn-request', [$this, 'successful_request']);
             add_action('woocommerce_receipt_' . $this->id, [$this, 'receipt_page']);
@@ -109,15 +156,15 @@ function woocommerce_payop()
                 ?>
             </table>
 
-        <?php else : ?>
-            <div class="inline error">
-                <p>
-                    <strong><?php _e('Gateway is disabled', 'payop-woocommerce'); ?></strong>:
-                    <?php _e('PayOp does not support the currency of your store.', 'payop-woocommerce'); ?>
-                </p>
-            </div>
-        <?php
-        endif;
+            <?php else : ?>
+                <div class="inline error">
+                    <p>
+                        <strong><?php _e('Gateway is disabled', 'payop-woocommerce'); ?></strong>:
+                        <?php _e('PayOp does not support the currency of your store.', 'payop-woocommerce'); ?>
+                    </p>
+                </div>
+            <?php
+            endif;
 
         } // End admin_options()
 
@@ -207,8 +254,8 @@ function woocommerce_payop()
                     'title' => __('Directpay payment method', 'wcs'),
                     'type' => 'select',
                     'description' => (count($this->get_payments_methods_options(true )) > 1) ?  __('Select default payment method to directpay. (In list only available to your account payment methods.) <br><span style="color: red;">This function is in experimental mode! Use this option with caution.<br>
-The unavailability of the payment method or not all submitted fields can make payment impossible</span>', 'payop-woocommerce') : "<span style='color: red'>JWT TOKEN REQUIRED FOR THIS FEATURE!!! </span><br>" . __('Select default payment method to directpay. (In list only available to your account payment methods.) <br><span style="color: red;">This function is in experimental mode! Use this option with caution.<br>
-The unavailability of the payment method or not all submitted fields can make payment impossible</span>', 'payop-woocommerce'),
+                ilability of the payment method or not all submitted fields can make payment impossible</span>', 'payop-woocommerce') : "<span style='color: red'>JWT TOKEN REQUIRED FOR THIS FEATURE!!! </span><br>" . __('Select default payment method to directpay. (In list only available to your account payment methods.) <br><span style="color: red;">This function is in experimental mode! Use this option with caution.<br>
+                The unavailability of the payment method or not all submitted fields can make payment impossible</span>', 'payop-woocommerce'),
                     'id' => 'wcs_chosen_categories',
                     'default' => '',
                     'css' => '',
@@ -222,10 +269,32 @@ The unavailability of the payment method or not all submitted fields can make pa
          **/
         public function payment_fields()
         {
-            if ($this->description) {
-                echo wpautop(wptexturize($this->description));
-            }
+            
+
+            $paymentMethods = $this->get_payments_methods_options(false);
+            $user_country = wcpbc_get_woocommerce_country();
+            ?>
+
+            <div id="custom_input">
+            <?php   
+            
+            foreach ($paymentMethods as $payment_method) {
+                if(in_array( $payment_method['identifier'], $this->accepted_methods ) and in_array( $user_country, $payment_method['countries'] )) { 
+                ?>
+                    <p class="form-row form-row-wide">
+                        <input type="radio" name="payment-method_payop" value="<?php echo $payment_method['identifier']; ?>" id="<?php echo $payment_method['title']; ?>">
+                        <label for="<?php echo $payment_method['title']; ?>" class=""><?php echo $payment_method['title']; ?></label>
+                    </p>
+                    <input type="hidden" name="available-currency_payop-<?php echo $payment_method['identifier']; ?>" value="<?php print_r(implode(',', $payment_method['currencies'])); ?>">
+                <?php
+                }
+            } 
+            ?>
+            
+            </div>
+            <?php
         }
+        
 
         /**
          * Select payment methods
@@ -251,11 +320,11 @@ The unavailability of the payment method or not all submitted fields can make pa
             if (!empty($arrData['jwt_token'])) {
                 $response = wp_remote_get($request_url, $args);
                 $response = wp_remote_retrieve_body($response);
-                error_log("Ответ на получение токена: " . $response);
                 $response = json_decode($response, true);
             }
             if (!empty($response['data'])) {
                 $this->valid_token = true;
+                return $response['data'];
                 foreach ($response['data'] as $item) {
                     if ($default) {
                         $methodOptions[$item['identifier']] = __($item['title'], 'woocommerce');
@@ -274,19 +343,28 @@ The unavailability of the payment method or not all submitted fields can make pa
 
             $order = new WC_Order($order_id);
 
+            $chosen_method = get_post_meta( $order_id, '_payment_method_payop', true );
+
             $out_summ = number_format($order->get_total(), 4, '.', '');
             $paymentMethods = $this->get_payments_methods_options(false);
+
+            $amount = $this->get_current_currency( $order_id, $out_summ, $order->get_currency() );
+            
+            error_log("Получили стомость: " . $amount[0] . " | Валюта: " . $amount[1]);
+
+            error_log("Выбранный способ: " . $chosen_method);
+
             $arrData = [];
             $arrData['publicKey'] = $this->public_key;
             $arrData['order'] = [];
             $arrData['order']['id'] = strval($order_id);
-            $arrData['order']['amount'] = $out_summ;
-            $arrData['order']['currency'] = $order->get_currency();
+            $arrData['order']['amount'] = $amount[0];
+            $arrData['order']['currency'] = $amount[1];
 
             $orderInfo = [
                 'id' => $order_id,
-                'amount' => $out_summ,
-                'currency' => $order->get_currency()
+                'amount' => $amount[0],
+                'currency' => $amount[1]
             ];
 
             ksort($orderInfo, SORT_STRING);
@@ -294,9 +372,10 @@ The unavailability of the payment method or not all submitted fields can make pa
             $dataSet[]  = $this->secret_key;
             $arrData['signature'] = hash('sha256', implode(':', $dataSet));
 
-            if ($paymentMethods && in_array($this->payment_method, $paymentMethods)) {
-                $arrData['paymentMethod'] = $this->payment_method;
-            }
+            // if ($paymentMethods && in_array($this->payment_method, $paymentMethods)) {
+            //     $arrData['paymentMethod'] = $this->payment_method;
+            // }
+            $arrData['paymentMethod'] =  $chosen_method;
 
             $arrData['order']['description'] = __('Payment order #', 'payop-woocommerce') . $order_id;
             $arrData['order']['items'] = [];
@@ -307,11 +386,13 @@ The unavailability of the payment method or not all submitted fields can make pa
                 $arrData['payer']['phone'] = $order->get_billing_phone();
             }
 
-            $arrData['language'] = $this->language;
+            $arrData['language'] = $this->language; 
 
             $arrData['resultUrl'] = get_site_url() . "/?wc-api=wc_payop&payop=success&orderId={$order_id}";
 
             $arrData['failPath'] = get_site_url() . "/?wc-api=wc_payop&payop=fail&orderId={$order_id}";
+
+            error_log(json_encode($arrData));
 
             $response = $this->apiRequest($arrData, 'identifier');
             if(isset($response['messages'])) {
@@ -333,10 +414,67 @@ The unavailability of the payment method or not all submitted fields can make pa
                 '</form>';
         }
 
+
+        public function get_current_currency( $order_id, $amount, $order_currency ) {
+            $currency_for_chosen_method = get_post_meta($order_id, '_currencies_for_payment_method_payop', true);
+            $currency_for_chosen_method_array = explode(',', $currency_for_chosen_method);
+            error_log("Получаем валюту и номинал. Исходный номинал: " . $amount . " | Валюта: " . $order_currency);
+            error_log("Разрешенные валюты для этой оплты: " . $currency_for_chosen_method );
+            if(in_array($order_currency, $currency_for_chosen_method_array)) {
+                error_log("Валюта есть в списке и мы возрващаем исходные данные");
+                return array($amount, $order_currency);
+            } else {
+                $order_currency = strtolower($order_currency);
+                $currency_payop = strtolower($currency_for_chosen_method_array[0]);
+
+                error_log("Валюты нет в списке, получаем курс валюты первого в списке разрешенных, это " . $currency_payop);
+
+                $url = 'https://cdn.jsdelivr.net/gh/fawazahmed0/currency-api@1/latest/currencies/'.$order_currency.'/'.$currency_payop.'.json';
+                $curl = curl_init();
+
+                curl_setopt_array($curl, array(
+                    CURLOPT_URL => $url,
+                    CURLOPT_RETURNTRANSFER => true,
+                    CURLOPT_ENCODING => '',
+                    CURLOPT_MAXREDIRS => 10,
+                    CURLOPT_TIMEOUT => 0,
+                    CURLOPT_FOLLOWLOCATION => true,
+                    CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
+                    CURLOPT_CUSTOMREQUEST => 'GET',
+                ));
+
+                $response = curl_exec($curl);
+
+                curl_close($curl);
+
+                error_log("Ответ апи: " . $response);
+                $response = json_decode($response, true);
+
+                $rate = $response[$currency_payop];
+
+                error_log("Курс валюты: " . $rate);
+
+                $total = $amount * $rate;
+
+                $total = number_format($total, 4, '.', '');
+
+                error_log("Стоимость в новой валюте: " . $total);
+
+                error_log("Возвращаем данные: " . $total . " | Валюта: " . $currency_for_chosen_method_array[0]);
+
+                return array($total, $currency_for_chosen_method_array[0]); 
+            }
+
+        }
+
+        
+
         public function process_payment( $order_id )
         {
             $order = new WC_Order($order_id);
             $order_key = $order->get_order_key();
+
+
 
 	        remove_all_filters('woocommerce_get_checkout_order_received_url');
 
@@ -439,6 +577,9 @@ The unavailability of the payment method or not all submitted fields can make pa
                 $postedData = $_GET;
             }
 
+            error_log("Ответ IPN: " . json_encode($postedData));
+
+
             switch ($requestType) {
                 case 'result':
                     @ob_clean();
@@ -499,6 +640,8 @@ The unavailability of the payment method or not all submitted fields can make pa
                     $orderId = $postedData['transaction']['order']['id'] ? $postedData['transaction']['order']['id'] : $postedData['orderId'];
                     $order = new WC_Order($orderId);
                     wp_redirect($order->get_cancel_order_url_raw());
+                    $text = json_encode($postedData);
+                    $order->add_order_note( 'Оплата не прошла в PayOp' );
                     break;
                 default:
                     wp_die('Invalid request', 'Invalid request', 400);
